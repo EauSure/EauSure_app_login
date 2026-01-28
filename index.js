@@ -87,5 +87,56 @@ app.post('/api/auth/login', async (req, res) => {
     res.status(500).json({ message: "Erreur serveur." });
   }
 });
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    // Connexion DB si nécessaire
+    if (mongoose.connection.readyState !== 1) {
+      await mongoose.connect(MONGO_URI);
+    }
+
+    const { email, password, name } = req.body;
+
+    // 1. Vérifier si l'email existe déjà
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: "Cet email est déjà utilisé." });
+    }
+
+    // 2. Hasher le mot de passe
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // 3. Créer l'utilisateur
+    const newUser = new User({
+      email,
+      password: hashedPassword,
+      name: name || "Utilisateur",
+      role: "user",
+      isProfileComplete: false,
+      createdAt: new Date(),
+      lastLogin: new Date()
+    });
+
+    await newUser.save();
+
+    // 4. Connecter l'utilisateur directement (Générer Token)
+    const SECRET = process.env.JWT_SECRET || 'secret_temp_key';
+    const token = jwt.sign({ id: newUser._id, role: newUser.role }, SECRET, { expiresIn: '7d' });
+
+    res.status(201).json({
+      token,
+      user: {
+        id: newUser._id,
+        email: newUser.email,
+        name: newUser.name,
+        role: newUser.role,
+        isProfileComplete: newUser.isProfileComplete
+      }
+    });
+
+  } catch (error) {
+    console.error("Register Error:", error);
+    res.status(500).json({ message: "Erreur lors de l'inscription." });
+  }
+});
 
 module.exports = app;
