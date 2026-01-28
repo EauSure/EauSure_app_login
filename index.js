@@ -58,7 +58,8 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     // C. Générer le token
-    const token = jwt.sign({ id: user._id }, 'SECRET_TEMP_KEY', { expiresIn: '1d' });
+   const SECRET = process.env.JWT_SECRET || 'secret_de_secours_insecurehggxjgdqcsygANNJ322iijcsjguyygzvruygyzguuygzkuy';
+   const token = jwt.sign({ id: user._id }, SECRET, { expiresIn: '1d' });
 
     res.json({
       token,
