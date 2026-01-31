@@ -14,16 +14,48 @@ app.use(express.json());
 app.use(cors());
 app.use(passport.initialize());
 
-// --- 1. CONFIGURATION MONGODB ---
+// --- 1. CONFIGURATION MONGODB ROBUSTE (SPÉCIAL VERCEL/SERVERLESS) ---
 const MONGO_URI = process.env.MONGO_URI;
 const JWT_SECRET = process.env.JWT_SECRET;
 
 if (!MONGO_URI) {
-  console.error("❌ ERREUR: MONGO_URI est manquant dans les variables d'environnement !");
-} else {
-  mongoose.connect(MONGO_URI)
-    .then(() => console.log('✅ Connecté à MongoDB'))
-    .catch(err => console.error('❌ Erreur MongoDB:', err));
+  throw new Error("❌ ERREUR CRITIQUE: MONGO_URI manquant !");
+}
+
+// Pattern "Cached Connection" : Obligatoire pour éviter les timeouts sur Vercel
+let cached = global.mongoose;
+
+if (!cached) {
+  cached = global.mongoose = { conn: null, promise: null };
+}
+
+async function connectDB() {
+  if (cached.conn) {
+    return cached.conn;
+  }
+
+  if (!cached.promise) {
+    const opts = {
+      bufferCommands: false, // Important : ne pas attendre indéfiniment
+      serverSelectionTimeoutMS: 5000, // Fail rapide si Mongo est down
+    };
+
+    console.log("⏳ Connexion à MongoDB...");
+    cached.promise = mongoose.connect(MONGO_URI, opts).then((mongoose) => {
+      console.log("✅ Connecté à MongoDB");
+      return mongoose;
+    });
+  }
+
+  try {
+    cached.conn = await cached.promise;
+  } catch (e) {
+    cached.promise = null;
+    console.error("❌ Erreur connexion MongoDB:", e);
+    throw e;
+  }
+
+  return cached.conn;
 }
 
 // --- 2. MODÈLE UTILISATEUR ---
@@ -47,15 +79,12 @@ console.log('🔐 Configuration OAuth:');
 console.log(`  - Google: ${GOOGLE_ENABLED ? '✅ Activé' : '❌ Désactivé'}`);
 console.log(`  - GitHub: ${GITHUB_ENABLED ? '✅ Activé' : '❌ Désactivé'}`);
 
-// --- FONCTION UTILITAIRE POUR URL FRONTEND ---
 const getFrontendUrl = () => {
-  // Récupère l'URL définie dans Vercel (ex: eausureapp://)
   const url = process.env.FRONTEND_URL || 'eausureapp://';
-  // S'assure qu'elle finit par un slash pour éviter eausureapp://--/auth...
   return url.endsWith('/') ? url : `${url}/`;
 };
 
-// 3.1 Google Strategy (MODE STRICT)
+// 3.1 Google Strategy (MODE STRICT + DB CONNECT)
 if (GOOGLE_ENABLED) {
   passport.use('google', new GoogleStrategy({
       clientID: process.env.GOOGLE_CLIENT_ID,
@@ -65,20 +94,21 @@ if (GOOGLE_ENABLED) {
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        // 1. Chercher par Google ID
+        // IMPORTANT : On s'assure que la DB est connectée AVANT de chercher
+        await connectDB();
+
         let user = await User.findOne({ googleId: profile.id });
         
-        // 2. Chercher par Email
         if (!user) {
           user = await User.findOne({ email: profile.emails[0].value });
         }
 
-        // 3. STRICT : Si pas d'user, on refuse l'accès
+        // MODE STRICT : Refus si inconnu
         if (!user) {
+          console.warn(`⚠️ Refus de connexion : ${profile.emails[0].value} n'est pas inscrit.`);
           return done(null, false, { message: 'unregistered_user' });
         }
         
-        // 4. Lier le compte si nécessaire
         if (!user.googleId) {
             user.googleId = profile.id;
             user.avatar = user.avatar || profile.photos[0]?.value;
@@ -87,13 +117,14 @@ if (GOOGLE_ENABLED) {
         
         return done(null, user);
       } catch (error) {
+        console.error("Erreur Google Strategy:", error);
         return done(error, null);
       }
     }
   ));
 }
 
-// 3.2 GitHub Strategy (MODE STRICT)
+// 3.2 GitHub Strategy (MODE STRICT + DB CONNECT)
 if (GITHUB_ENABLED) {
   passport.use('github', new GitHubStrategy({
       clientID: process.env.GITHUB_CLIENT_ID,
@@ -103,6 +134,8 @@ if (GITHUB_ENABLED) {
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
+        await connectDB(); // Connexion explicite
+
         let user = await User.findOne({ githubId: profile.id });
         
         if (!user) {
@@ -110,7 +143,6 @@ if (GITHUB_ENABLED) {
           user = await User.findOne({ email });
         }
 
-        // STRICT : Refus si inconnu
         if (!user) {
           return done(null, false, { message: 'unregistered_user' });
         }
@@ -123,13 +155,25 @@ if (GITHUB_ENABLED) {
         
         return done(null, user);
       } catch (error) {
+        console.error("Erreur GitHub Strategy:", error);
         return done(error, null);
       }
     }
   ));
 }
 
-// --- 4. ROUTES AUTHENTIFICATION ---
+// --- 4. ROUTES ---
+
+// Middleware Global pour connecter la DB sur toutes les routes API
+app.use('/api', async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (error) {
+    console.error("❌ Impossible de connecter la DB:", error);
+    res.status(500).json({ message: "Erreur de connexion base de données" });
+  }
+});
 
 // Login classique
 app.post('/api/auth/login', async (req, res) => {
@@ -174,14 +218,19 @@ app.get('/api/auth/google', (req, res, next) => {
 app.get('/api/auth/google/callback', (req, res, next) => {
   const baseUrl = getFrontendUrl();
   passport.authenticate('google', { session: false }, (err, user, info) => {
-    if (err) return res.redirect(`${baseUrl}--/auth/callback?error=server_error`);
+    // Cas Erreur Technique
+    if (err) {
+      console.error("❌ Erreur Passport:", err);
+      return res.redirect(`${baseUrl}--/auth/callback?error=server_error`);
+    }
     
-    // GESTION ERREUR "USER NOT FOUND"
+    // Cas Utilisateur Inconnu (Mode Strict)
     if (!user) {
       const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
       return res.redirect(`${baseUrl}--/auth/callback?error=${errorMsg}`);
     }
     
+    // Cas Succès
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
     res.redirect(`${baseUrl}--/auth/callback?token=${token}`);
   })(req, res, next);
@@ -220,6 +269,7 @@ const authenticateToken = (req, res, next) => {
 };
 
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  // DB déjà connectée par le middleware global
   const user = await User.findById(req.userId).select('-password');
   if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
   res.json({ user });
@@ -228,6 +278,7 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
 app.get('/', (req, res) => res.send("API EauSûre Online 💧"));
 
 module.exports = app;
+
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => console.log(`🚀 Server on http://localhost:${PORT}`));
