@@ -16,7 +16,7 @@ app.use(passport.initialize());
 
 // --- 1. CONFIGURATION MONGODB ---
 const MONGO_URI = process.env.MONGO_URI;
-const JWT_SECRET = process.env.JWT_SECRET || 'SECRET_TEMP_KEY';
+const JWT_SECRET = process.env.JWT_SECRET;
 
 if (!MONGO_URI) {
   console.error("❌ ERREUR: MONGO_URI est manquant dans les variables d'environnement !");
