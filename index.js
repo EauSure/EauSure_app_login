@@ -58,6 +58,38 @@ async function connectDB() {
   return cached.conn;
 }
 
+// --- FONCTION MAGIQUE : REDIRECTION HTML POUR MOBILE ---
+// Force le navigateur à ouvrir l'app via JavaScript + Bouton de secours
+const sendMobileRedirect = (res, url) => {
+  const html = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Redirection...</title>
+      </head>
+      <body style="background-color: #0f172a; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+        <div style="text-align: center; padding: 20px;">
+          <div style="margin-bottom: 20px; font-size: 40px;">💧</div>
+          <h2 style="margin-bottom: 10px;">Retour à l'application</h2>
+          <p style="color: #94a3b8; margin-bottom: 30px;">Si la redirection ne se fait pas automatiquement, cliquez ci-dessous.</p>
+          <a href="${url}" style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 12px; font-weight: bold; display: inline-block;">
+            Ouvrir EauSûre
+          </a>
+          
+          <script>
+            // Tentative de redirection automatique après 100ms
+            setTimeout(function() {
+              window.location.href = "${url}";
+            }, 100);
+          </script>
+        </div>
+      </body>
+    </html>
+  `;
+  res.send(html);
+};
+
 // --- 2. MODÈLE UTILISATEUR ---
 const UserSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
@@ -94,7 +126,6 @@ if (GOOGLE_ENABLED) {
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        // IMPORTANT : On s'assure que la DB est connectée AVANT de chercher
         await connectDB();
 
         let user = await User.findOne({ googleId: profile.id });
@@ -134,7 +165,7 @@ if (GITHUB_ENABLED) {
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        await connectDB(); // Connexion explicite
+        await connectDB(); 
 
         let user = await User.findOne({ githubId: profile.id });
         
@@ -209,7 +240,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// --- ROUTES GOOGLE ---
+// --- ROUTES GOOGLE (CORRIGÉES AVEC SENDMOBILEREDIRECT) ---
 app.get('/api/auth/google', (req, res, next) => {
   if (!GOOGLE_ENABLED) return res.status(503).json({ message: "Google non configuré" });
   passport.authenticate('google', { scope: ['profile', 'email'], session: false })(req, res, next);
@@ -221,22 +252,25 @@ app.get('/api/auth/google/callback', (req, res, next) => {
     // Cas Erreur Technique
     if (err) {
       console.error("❌ Erreur Passport:", err);
-      return res.redirect(`${baseUrl}--/auth/callback?error=server_error`);
+      // ICI : Utilisation de la page HTML au lieu de res.redirect
+      return sendMobileRedirect(res, `${baseUrl}--/auth/callback?error=server_error`);
     }
     
     // Cas Utilisateur Inconnu (Mode Strict)
     if (!user) {
       const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
-      return res.redirect(`${baseUrl}--/auth/callback?error=${errorMsg}`);
+      // ICI : Utilisation de la page HTML
+      return sendMobileRedirect(res, `${baseUrl}--/auth/callback?error=${errorMsg}`);
     }
     
     // Cas Succès
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.redirect(`${baseUrl}--/auth/callback?token=${token}`);
+    // ICI : Utilisation de la page HTML
+    sendMobileRedirect(res, `${baseUrl}--/auth/callback?token=${token}`);
   })(req, res, next);
 });
 
-// --- ROUTES GITHUB ---
+// --- ROUTES GITHUB (CORRIGÉES AVEC SENDMOBILEREDIRECT) ---
 app.get('/api/auth/github', (req, res, next) => {
   if (!GITHUB_ENABLED) return res.status(503).json({ message: "GitHub non configuré" });
   passport.authenticate('github', { scope: ['user:email'], session: false })(req, res, next);
@@ -245,15 +279,18 @@ app.get('/api/auth/github', (req, res, next) => {
 app.get('/api/auth/github/callback', (req, res, next) => {
   const baseUrl = getFrontendUrl();
   passport.authenticate('github', { session: false }, (err, user, info) => {
-    if (err) return res.redirect(`${baseUrl}--/auth/callback?error=server_error`);
+    // ICI : Utilisation de la page HTML
+    if (err) return sendMobileRedirect(res, `${baseUrl}--/auth/callback?error=server_error`);
     
+    // ICI : Utilisation de la page HTML
     if (!user) {
       const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
-      return res.redirect(`${baseUrl}--/auth/callback?error=${errorMsg}`);
+      return sendMobileRedirect(res, `${baseUrl}--/auth/callback?error=${errorMsg}`);
     }
     
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.redirect(`${baseUrl}--/auth/callback?token=${token}`);
+    // ICI : Utilisation de la page HTML
+    sendMobileRedirect(res, `${baseUrl}--/auth/callback?token=${token}`);
   })(req, res, next);
 });
 
