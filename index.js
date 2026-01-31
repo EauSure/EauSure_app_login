@@ -40,24 +40,31 @@ const UserSchema = new mongoose.Schema({
 
 const User = mongoose.models.User || mongoose.model('User', UserSchema);
 
-// --- 3. CONFIGURATION PASSPORT (NOUVEAU) ---
+// --- 3. CONFIGURATION PASSPORT ---
+
+// Vérifier si OAuth est configuré
+const GOOGLE_ENABLED = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+const GITHUB_ENABLED = !!(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET);
+
+console.log('🔐 Configuration OAuth:');
+console.log(`  - Google: ${GOOGLE_ENABLED ? '✅ Activé' : '❌ Désactivé (credentials manquants)'}`);
+console.log(`  - GitHub: ${GITHUB_ENABLED ? '✅ Activé' : '❌ Désactivé (credentials manquants)'}`);
 
 // Google OAuth Strategy
-if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-  passport.use(new GoogleStrategy({
+if (GOOGLE_ENABLED) {
+  passport.use('google', new GoogleStrategy({
       clientID: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: `${process.env.API_URL || 'http://localhost:3000'}/api/auth/google/callback`
+      callbackURL: `${process.env.API_URL || 'http://localhost:3000'}/api/auth/google/callback`,
+      proxy: true
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
         let user = await User.findOne({ googleId: profile.id });
         
         if (!user) {
-          // Vérifier si l'email existe déjà
           const existingUser = await User.findOne({ email: profile.emails[0].value });
           if (existingUser) {
-            // Lier le compte Google à l'utilisateur existant
             existingUser.googleId = profile.id;
             existingUser.name = existingUser.name || profile.displayName;
             existingUser.avatar = existingUser.avatar || profile.photos[0]?.value;
@@ -65,7 +72,6 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
             return done(null, existingUser);
           }
           
-          // Créer un nouvel utilisateur
           user = await User.create({
             googleId: profile.id,
             email: profile.emails[0].value,
@@ -77,6 +83,7 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
         
         return done(null, user);
       } catch (error) {
+        console.error('Google OAuth error:', error);
         return done(error, null);
       }
     }
@@ -84,11 +91,12 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
 }
 
 // GitHub OAuth Strategy
-if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
-  passport.use(new GitHubStrategy({
+if (GITHUB_ENABLED) {
+  passport.use('github', new GitHubStrategy({
       clientID: process.env.GITHUB_CLIENT_ID,
       clientSecret: process.env.GITHUB_CLIENT_SECRET,
-      callbackURL: `${process.env.API_URL || 'http://localhost:3000'}/api/auth/github/callback`
+      callbackURL: `${process.env.API_URL || 'http://localhost:3000'}/api/auth/github/callback`,
+      proxy: true
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
@@ -117,6 +125,7 @@ if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
         
         return done(null, user);
       } catch (error) {
+        console.error('GitHub OAuth error:', error);
         return done(error, null);
       }
     }
@@ -129,7 +138,14 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api', (req, res) => {
-  res.json({ status: "API Working", time: new Date() });
+  res.json({ 
+    status: "API Working", 
+    time: new Date(),
+    oauth: {
+      google: GOOGLE_ENABLED,
+      github: GITHUB_ENABLED
+    }
+  });
 });
 
 // --- 5. ROUTE DE LOGIN (LÉGÈREMENT MODIFIÉE) ---
@@ -173,7 +189,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// --- 6. ROUTE DE REGISTER (SI ELLE EXISTE) ---
+// --- 6. ROUTE DE REGISTER ---
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
@@ -209,53 +225,79 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// --- 7. NOUVELLES ROUTES OAUTH GOOGLE ---
+// --- 7. ROUTES OAUTH GOOGLE ---
 
-app.get('/api/auth/google',
+app.get('/api/auth/google', (req, res, next) => {
+  if (!GOOGLE_ENABLED) {
+    return res.status(503).json({ 
+      message: "Google OAuth n'est pas configuré. Veuillez ajouter GOOGLE_CLIENT_ID et GOOGLE_CLIENT_SECRET dans les variables d'environnement." 
+    });
+  }
   passport.authenticate('google', { 
     scope: ['profile', 'email'],
     session: false 
-  })
-);
+  })(req, res, next);
+});
 
-app.get('/api/auth/google/callback',
-  passport.authenticate('google', { session: false, failureRedirect: '/login' }),
-  (req, res) => {
+app.get('/api/auth/google/callback', (req, res, next) => {
+  if (!GOOGLE_ENABLED) {
+    return res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=google_not_configured`);
+  }
+  
+  passport.authenticate('google', { session: false }, (err, user, info) => {
+    if (err || !user) {
+      console.error('Google auth error:', err);
+      return res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=auth_failed`);
+    }
+    
     try {
-      const token = jwt.sign({ id: req.user._id }, JWT_SECRET, { expiresIn: '7d' });
+      const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
       const redirectUrl = `${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?token=${token}`;
       res.redirect(redirectUrl);
     } catch (error) {
-      console.error(error);
-      res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=auth_failed`);
+      console.error('Token generation error:', error);
+      res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=token_error`);
     }
+  })(req, res, next);
+});
+
+// --- 8. ROUTES OAUTH GITHUB ---
+
+app.get('/api/auth/github', (req, res, next) => {
+  if (!GITHUB_ENABLED) {
+    return res.status(503).json({ 
+      message: "GitHub OAuth n'est pas configuré. Veuillez ajouter GITHUB_CLIENT_ID et GITHUB_CLIENT_SECRET dans les variables d'environnement." 
+    });
   }
-);
-
-// --- 8. NOUVELLES ROUTES OAUTH GITHUB ---
-
-app.get('/api/auth/github',
   passport.authenticate('github', { 
     scope: ['user:email'],
     session: false 
-  })
-);
+  })(req, res, next);
+});
 
-app.get('/api/auth/github/callback',
-  passport.authenticate('github', { session: false, failureRedirect: '/login' }),
-  (req, res) => {
+app.get('/api/auth/github/callback', (req, res, next) => {
+  if (!GITHUB_ENABLED) {
+    return res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=github_not_configured`);
+  }
+  
+  passport.authenticate('github', { session: false }, (err, user, info) => {
+    if (err || !user) {
+      console.error('GitHub auth error:', err);
+      return res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=auth_failed`);
+    }
+    
     try {
-      const token = jwt.sign({ id: req.user._id }, JWT_SECRET, { expiresIn: '7d' });
+      const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
       const redirectUrl = `${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?token=${token}`;
       res.redirect(redirectUrl);
     } catch (error) {
-      console.error(error);
-      res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=auth_failed`);
+      console.error('Token generation error:', error);
+      res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=token_error`);
     }
-  }
-);
+  })(req, res, next);
+});
 
-// --- 9. NOUVELLE ROUTE POUR OBTENIR L'UTILISATEUR ACTUEL ---
+// --- 9. ROUTE POUR OBTENIR L'UTILISATEUR ACTUEL ---
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
