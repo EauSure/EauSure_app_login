@@ -26,11 +26,10 @@ if (!MONGO_URI) {
     .catch(err => console.error('❌ Erreur MongoDB:', err));
 }
 
-// --- 2. MODÈLE UTILISATEUR (avec champs OAuth ajoutés) ---
+// --- 2. MODÈLE UTILISATEUR ---
 const UserSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
-  password: { type: String }, // Maintenant optionnel (pas requis pour OAuth)
-  // NOUVEAUX CHAMPS POUR OAUTH
+  password: { type: String }, 
   googleId: { type: String, sparse: true, unique: true },
   githubId: { type: String, sparse: true, unique: true },
   name: { type: String },
@@ -41,61 +40,65 @@ const UserSchema = new mongoose.Schema({
 const User = mongoose.models.User || mongoose.model('User', UserSchema);
 
 // --- 3. CONFIGURATION PASSPORT ---
-
-// Vérifier si OAuth est configuré
 const GOOGLE_ENABLED = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
 const GITHUB_ENABLED = !!(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET);
 
 console.log('🔐 Configuration OAuth:');
-console.log(`  - Google: ${GOOGLE_ENABLED ? '✅ Activé' : '❌ Désactivé (credentials manquants)'}`);
-console.log(`  - GitHub: ${GITHUB_ENABLED ? '✅ Activé' : '❌ Désactivé (credentials manquants)'}`);
+console.log(`  - Google: ${GOOGLE_ENABLED ? '✅ Activé' : '❌ Désactivé'}`);
+console.log(`  - GitHub: ${GITHUB_ENABLED ? '✅ Activé' : '❌ Désactivé'}`);
 
-// Google OAuth Strategy
+// --- FONCTION UTILITAIRE POUR URL FRONTEND ---
+const getFrontendUrl = () => {
+  // Récupère l'URL définie dans Vercel (ex: eausureapp://)
+  const url = process.env.FRONTEND_URL || 'eausureapp://';
+  // S'assure qu'elle finit par un slash pour éviter eausureapp://--/auth...
+  return url.endsWith('/') ? url : `${url}/`;
+};
+
+// 3.1 Google Strategy (MODE STRICT)
 if (GOOGLE_ENABLED) {
   passport.use('google', new GoogleStrategy({
       clientID: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: `${process.env.API_URL || 'http://localhost:3000'}/api/auth/google/callback`,
+      callbackURL: `${process.env.API_URL}/api/auth/google/callback`,
       proxy: true
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
+        // 1. Chercher par Google ID
         let user = await User.findOne({ googleId: profile.id });
         
+        // 2. Chercher par Email
         if (!user) {
-          const existingUser = await User.findOne({ email: profile.emails[0].value });
-          if (existingUser) {
-            existingUser.googleId = profile.id;
-            existingUser.name = existingUser.name || profile.displayName;
-            existingUser.avatar = existingUser.avatar || profile.photos[0]?.value;
-            await existingUser.save();
-            return done(null, existingUser);
-          }
-          
-          user = await User.create({
-            googleId: profile.id,
-            email: profile.emails[0].value,
-            name: profile.displayName,
-            avatar: profile.photos[0]?.value,
-            authProvider: 'google'
-          });
+          user = await User.findOne({ email: profile.emails[0].value });
+        }
+
+        // 3. STRICT : Si pas d'user, on refuse l'accès
+        if (!user) {
+          return done(null, false, { message: 'unregistered_user' });
+        }
+        
+        // 4. Lier le compte si nécessaire
+        if (!user.googleId) {
+            user.googleId = profile.id;
+            user.avatar = user.avatar || profile.photos[0]?.value;
+            await user.save();
         }
         
         return done(null, user);
       } catch (error) {
-        console.error('Google OAuth error:', error);
         return done(error, null);
       }
     }
   ));
 }
 
-// GitHub OAuth Strategy
+// 3.2 GitHub Strategy (MODE STRICT)
 if (GITHUB_ENABLED) {
   passport.use('github', new GitHubStrategy({
       clientID: process.env.GITHUB_CLIENT_ID,
       clientSecret: process.env.GITHUB_CLIENT_SECRET,
-      callbackURL: `${process.env.API_URL || 'http://localhost:3000'}/api/auth/github/callback`,
+      callbackURL: `${process.env.API_URL}/api/auth/github/callback`,
       proxy: true
     },
     async (accessToken, refreshToken, profile, done) => {
@@ -104,247 +107,128 @@ if (GITHUB_ENABLED) {
         
         if (!user) {
           const email = profile.emails?.[0]?.value || `${profile.username}@github.user`;
-          const existingUser = await User.findOne({ email });
-          
-          if (existingUser) {
-            existingUser.githubId = profile.id;
-            existingUser.name = existingUser.name || profile.displayName || profile.username;
-            existingUser.avatar = existingUser.avatar || profile.photos?.[0]?.value;
-            await existingUser.save();
-            return done(null, existingUser);
-          }
-          
-          user = await User.create({
-            githubId: profile.id,
-            email,
-            name: profile.displayName || profile.username,
-            avatar: profile.photos?.[0]?.value,
-            authProvider: 'github'
-          });
+          user = await User.findOne({ email });
+        }
+
+        // STRICT : Refus si inconnu
+        if (!user) {
+          return done(null, false, { message: 'unregistered_user' });
+        }
+        
+        if (!user.githubId) {
+            user.githubId = profile.id;
+            user.avatar = user.avatar || profile.photos?.[0]?.value;
+            await user.save();
         }
         
         return done(null, user);
       } catch (error) {
-        console.error('GitHub OAuth error:', error);
         return done(error, null);
       }
     }
   ));
 }
 
-// --- 4. ROUTES DE TEST (INCHANGÉES) ---
-app.get('/', (req, res) => {
-  res.send("API EauSûre est en ligne 💧");
-});
+// --- 4. ROUTES AUTHENTIFICATION ---
 
-app.get('/api', (req, res) => {
-  res.json({ 
-    status: "API Working", 
-    time: new Date(),
-    oauth: {
-      google: GOOGLE_ENABLED,
-      github: GITHUB_ENABLED
-    }
-  });
-});
-
-// --- 5. ROUTE DE LOGIN (LÉGÈREMENT MODIFIÉE) ---
+// Login classique
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-
     const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(400).json({ message: "Email introuvable." });
-    }
-
-    // Vérifier que ce n'est pas un compte OAuth uniquement
-    if (!user.password) {
-      return res.status(400).json({ 
-        message: `Ce compte utilise ${user.authProvider}. Veuillez vous connecter avec ${user.authProvider}.` 
-      });
-    }
+    if (!user) return res.status(400).json({ message: "Email introuvable." });
+    if (!user.password) return res.status(400).json({ message: `Utilisez la connexion ${user.authProvider}.` });
 
     const isMatch = await bcrypt.compare(password, user.password);
-    
-    if (!isMatch) {
-      return res.status(400).json({ message: "Mot de passe incorrect." });
-    }
+    if (!isMatch) return res.status(400).json({ message: "Mot de passe incorrect." });
 
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-
-    res.json({
-      token,
-      user: { 
-        id: user._id, 
-        email: user.email,
-        name: user.name,
-        avatar: user.avatar
-      }
-    });
-
+    res.json({ token, user: { id: user._id, email: user.email, name: user.name, avatar: user.avatar } });
   } catch (error) {
-    console.error(error);
     res.status(500).json({ message: "Erreur serveur." });
   }
 });
 
-// --- 6. ROUTE DE REGISTER ---
+// Register classique
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
-
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: "Email déjà utilisé." });
-    }
+    if (await User.findOne({ email })) return res.status(400).json({ message: "Email déjà utilisé." });
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    
-    const newUser = await User.create({
-      email,
-      password: hashedPassword,
-      name,
-      authProvider: 'local'
-    });
-
+    const newUser = await User.create({ email, password: hashedPassword, name, authProvider: 'local' });
     const token = jwt.sign({ id: newUser._id }, JWT_SECRET, { expiresIn: '7d' });
 
-    res.status(201).json({
-      token,
-      user: { 
-        id: newUser._id, 
-        email: newUser.email,
-        name: newUser.name
-      }
-    });
-
+    res.status(201).json({ token, user: { id: newUser._id, email: newUser.email, name: newUser.name } });
   } catch (error) {
-    console.error(error);
     res.status(500).json({ message: "Erreur serveur." });
   }
 });
 
-// --- 7. ROUTES OAUTH GOOGLE ---
-
+// --- ROUTES GOOGLE ---
 app.get('/api/auth/google', (req, res, next) => {
-  if (!GOOGLE_ENABLED) {
-    return res.status(503).json({ 
-      message: "Google OAuth n'est pas configuré. Veuillez ajouter GOOGLE_CLIENT_ID et GOOGLE_CLIENT_SECRET dans les variables d'environnement." 
-    });
-  }
-  passport.authenticate('google', { 
-    scope: ['profile', 'email'],
-    session: false 
-  })(req, res, next);
+  if (!GOOGLE_ENABLED) return res.status(503).json({ message: "Google non configuré" });
+  passport.authenticate('google', { scope: ['profile', 'email'], session: false })(req, res, next);
 });
 
 app.get('/api/auth/google/callback', (req, res, next) => {
-  if (!GOOGLE_ENABLED) {
-    return res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=google_not_configured`);
-  }
-  
+  const baseUrl = getFrontendUrl();
   passport.authenticate('google', { session: false }, (err, user, info) => {
-    if (err || !user) {
-      console.error('Google auth error:', err);
-      return res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=auth_failed`);
+    if (err) return res.redirect(`${baseUrl}--/auth/callback?error=server_error`);
+    
+    // GESTION ERREUR "USER NOT FOUND"
+    if (!user) {
+      const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
+      return res.redirect(`${baseUrl}--/auth/callback?error=${errorMsg}`);
     }
     
-    try {
-      const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-      const redirectUrl = `${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?token=${token}`;
-      res.redirect(redirectUrl);
-    } catch (error) {
-      console.error('Token generation error:', error);
-      res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=token_error`);
-    }
+    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
+    res.redirect(`${baseUrl}--/auth/callback?token=${token}`);
   })(req, res, next);
 });
 
-// --- 8. ROUTES OAUTH GITHUB ---
-
+// --- ROUTES GITHUB ---
 app.get('/api/auth/github', (req, res, next) => {
-  if (!GITHUB_ENABLED) {
-    return res.status(503).json({ 
-      message: "GitHub OAuth n'est pas configuré. Veuillez ajouter GITHUB_CLIENT_ID et GITHUB_CLIENT_SECRET dans les variables d'environnement." 
-    });
-  }
-  passport.authenticate('github', { 
-    scope: ['user:email'],
-    session: false 
-  })(req, res, next);
+  if (!GITHUB_ENABLED) return res.status(503).json({ message: "GitHub non configuré" });
+  passport.authenticate('github', { scope: ['user:email'], session: false })(req, res, next);
 });
 
 app.get('/api/auth/github/callback', (req, res, next) => {
-  if (!GITHUB_ENABLED) {
-    return res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=github_not_configured`);
-  }
-  
+  const baseUrl = getFrontendUrl();
   passport.authenticate('github', { session: false }, (err, user, info) => {
-    if (err || !user) {
-      console.error('GitHub auth error:', err);
-      return res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=auth_failed`);
+    if (err) return res.redirect(`${baseUrl}--/auth/callback?error=server_error`);
+    
+    if (!user) {
+      const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
+      return res.redirect(`${baseUrl}--/auth/callback?error=${errorMsg}`);
     }
     
-    try {
-      const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-      const redirectUrl = `${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?token=${token}`;
-      res.redirect(redirectUrl);
-    } catch (error) {
-      console.error('Token generation error:', error);
-      res.redirect(`${process.env.FRONTEND_URL || 'eausure://'}--/auth/callback?error=token_error`);
-    }
+    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
+    res.redirect(`${baseUrl}--/auth/callback?token=${token}`);
   })(req, res, next);
 });
 
-// --- 9. ROUTE POUR OBTENIR L'UTILISATEUR ACTUEL ---
+// --- UTILS ---
 const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ message: 'Token manquant' });
-  }
-
+  const token = req.headers['authorization']?.split(' ')[1];
+  if (!token) return res.status(401).json({ message: 'Token manquant' });
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err) {
-      return res.status(403).json({ message: 'Token invalide' });
-    }
+    if (err) return res.status(403).json({ message: 'Token invalide' });
     req.userId = decoded.id;
     next();
   });
 };
 
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId).select('-password');
-    
-    if (!user) {
-      return res.status(404).json({ message: 'Utilisateur introuvable' });
-    }
-
-    res.json({
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-        avatar: user.avatar,
-        authProvider: user.authProvider
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Erreur serveur' });
-  }
+  const user = await User.findById(req.userId).select('-password');
+  if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+  res.json({ user });
 });
 
-// --- 10. EXPORT POUR VERCEL (INCHANGÉ) ---
-module.exports = app;
+app.get('/', (req, res) => res.send("API EauSûre Online 💧"));
 
-// Lancement local seulement
+module.exports = app;
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`🚀 Serveur lancé sur http://localhost:${PORT}`);
-  });
+  app.listen(PORT, () => console.log(`🚀 Server on http://localhost:${PORT}`));
 }
