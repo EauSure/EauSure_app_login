@@ -80,8 +80,12 @@ console.log(`  - Google: ${GOOGLE_ENABLED ? '✅ Activé' : '❌ Désactivé'}`)
 console.log(`  - GitHub: ${GITHUB_ENABLED ? '✅ Activé' : '❌ Désactivé'}`);
 
 const getFrontendUrl = () => {
-  const url = process.env.FRONTEND_URL || 'eausureapp://';
-  return url.endsWith('/') ? url : `${url}/`;
+ let url = process.env.FRONTEND_URL || 'eausureapp://';
+  // Remove the last slash if it exists
+  if (url.endsWith('/')) {
+    url = url.slice(0, -1);
+  }
+  return url;
 };
 
 // 3.1 Google Strategy (MODE STRICT + DB CONNECT)
@@ -221,18 +225,18 @@ app.get('/api/auth/google/callback', (req, res, next) => {
     // Cas Erreur Technique
     if (err) {
       console.error("❌ Erreur Passport:", err);
-      return res.redirect(`${baseUrl}login?error=server_error`);
+      return res.redirect(`${baseUrl}/login?error=server_error`);
     }
     
     // Cas Utilisateur Inconnu (Mode Strict)
     if (!user) {
       const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
-      return res.redirect(`${baseUrl}login?error=${errorMsg}`);
+      return res.redirect(`${baseUrl}/login?error=${errorMsg}`);
     }
     
     // Cas Succès
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.redirect(`${baseUrl}login?token=${token}`);
+    res.redirect(`${baseUrl}/login?token=${token}`);
   })(req, res, next);
 });
 
@@ -245,15 +249,15 @@ app.get('/api/auth/github', (req, res, next) => {
 app.get('/api/auth/github/callback', (req, res, next) => {
   const baseUrl = getFrontendUrl();
   passport.authenticate('github', { session: false }, (err, user, info) => {
-    if (err) return res.redirect(`${baseUrl}login?error=server_error`);
+    if (err) return res.redirect(`${baseUrl}/login?error=server_error`);
     
     if (!user) {
       const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
-      return res.redirect(`${baseUrl}login?error=${errorMsg}`);
+      return res.redirect(`${baseUrl}/login?error=${errorMsg}`);
     }
     
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.redirect(`${baseUrl}login?token=${token}`);
+    res.redirect(`${baseUrl}/login?token=${token}`);
   })(req, res, next);
 });
 
