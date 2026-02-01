@@ -221,18 +221,18 @@ app.get('/api/auth/google/callback', (req, res, next) => {
     // Cas Erreur Technique
     if (err) {
       console.error("❌ Erreur Passport:", err);
-      return res.redirect(`${baseUrl}--/auth/callback?error=server_error`);
+      return res.redirect(`${baseUrl}--/login?error=server_error`);
     }
     
     // Cas Utilisateur Inconnu (Mode Strict)
     if (!user) {
       const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
-      return res.redirect(`${baseUrl}--/auth/callback?error=${errorMsg}`);
+      return res.redirect(`${baseUrl}--/login?error=${errorMsg}`);
     }
     
     // Cas Succès
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.redirect(`${baseUrl}--/auth/callback?token=${token}`);
+    res.redirect(`${baseUrl}--/login?token=${token}`);
   })(req, res, next);
 });
 
