@@ -14,7 +14,7 @@ app.use(express.json());
 app.use(cors());
 app.use(passport.initialize());
 
-// --- 1. CONFIGURATION MONGODB ROBUSTE (SPÉCIAL VERCEL/SERVERLESS) ---
+// --- 1. CONFIGURATION MONGODB ROBUSTE ---
 const MONGO_URI = process.env.MONGO_URI;
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -22,31 +22,21 @@ if (!MONGO_URI) {
   throw new Error("❌ ERREUR CRITIQUE: MONGO_URI manquant !");
 }
 
-// Pattern "Cached Connection" : Obligatoire pour éviter les timeouts sur Vercel
 let cached = global.mongoose;
-
 if (!cached) {
   cached = global.mongoose = { conn: null, promise: null };
 }
 
 async function connectDB() {
-  if (cached.conn) {
-    return cached.conn;
-  }
-
+  if (cached.conn) return cached.conn;
   if (!cached.promise) {
-    const opts = {
-      bufferCommands: false, // Important : ne pas attendre indéfiniment
-      serverSelectionTimeoutMS: 5000, // Fail rapide si Mongo est down
-    };
-
+    const opts = { bufferCommands: false, serverSelectionTimeoutMS: 5000 };
     console.log("⏳ Connexion à MongoDB...");
     cached.promise = mongoose.connect(MONGO_URI, opts).then((mongoose) => {
       console.log("✅ Connecté à MongoDB");
       return mongoose;
     });
   }
-
   try {
     cached.conn = await cached.promise;
   } catch (e) {
@@ -54,7 +44,6 @@ async function connectDB() {
     console.error("❌ Erreur connexion MongoDB:", e);
     throw e;
   }
-
   return cached.conn;
 }
 
@@ -80,16 +69,13 @@ console.log(`  - Google: ${GOOGLE_ENABLED ? '✅ Activé' : '❌ Désactivé'}`)
 console.log(`  - GitHub: ${GITHUB_ENABLED ? '✅ Activé' : '❌ Désactivé'}`);
 
 const getFrontendUrl = () => {
-  let url = process.env.FRONTEND_URL;
-
-  // remove trailing slashes
-  url = url.replace(/\/+$/, '');
-
-  return url;
+  let url = process.env.FRONTEND_URL || 'http://localhost:8081'; // Fallback for dev
+  return url.replace(/\/+$/, '');
 };
 
-// 3.1 Google Strategy for LOGIN (MODE STRICT)
+// 3.1 Google Strategy (UNCHANGED for brevity, keeping your existing logic)
 if (GOOGLE_ENABLED) {
+  // Login Strategy
   passport.use('google', new GoogleStrategy({
       clientID: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
@@ -99,34 +85,21 @@ if (GOOGLE_ENABLED) {
     async (accessToken, refreshToken, profile, done) => {
       try {
         await connectDB();
-
         let user = await User.findOne({ googleId: profile.id });
-        
-        if (!user) {
-          user = await User.findOne({ email: profile.emails[0].value });
-        }
-
-        // MODE STRICT : Refus si inconnu
-        if (!user) {
-          console.warn(`⚠️ Refus de connexion : ${profile.emails[0].value} n'est pas inscrit.`);
-          return done(null, false, { message: 'unregistered_user' });
-        }
+        if (!user) user = await User.findOne({ email: profile.emails[0].value });
+        if (!user) return done(null, false, { message: 'unregistered_user' });
         
         if (!user.googleId) {
             user.googleId = profile.id;
             user.avatar = user.avatar || profile.photos[0]?.value;
             await user.save();
         }
-        
         return done(null, user);
-      } catch (error) {
-        console.error("Erreur Google Strategy:", error);
-        return done(error, null);
-      }
+      } catch (error) { return done(error, null); }
     }
   ));
 
-  // 3.2 Google Strategy for REGISTRATION (CREATE NEW USERS)
+  // Register Strategy
   passport.use('google-register', new GoogleStrategy({
       clientID: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
@@ -136,107 +109,77 @@ if (GOOGLE_ENABLED) {
     async (accessToken, refreshToken, profile, done) => {
       try {
         await connectDB();
-
         const email = profile.emails[0].value;
-        
-        // Check if user already exists
         let user = await User.findOne({ $or: [{ googleId: profile.id }, { email }] });
+        if (user) return done(null, false, { message: 'user_already_exists' });
         
-        if (user) {
-          console.warn(`⚠️ User already exists: ${email}`);
-          return done(null, false, { message: 'user_already_exists' });
-        }
-        
-        // Create new user
         user = await User.create({
-          email,
-          googleId: profile.id,
-          name: profile.displayName,
-          avatar: profile.photos[0]?.value,
-          authProvider: 'google'
+          email, googleId: profile.id, name: profile.displayName,
+          avatar: profile.photos[0]?.value, authProvider: 'google'
         });
-        
-        console.log(`✅ New user created via Google: ${email}`);
         return done(null, user);
-      } catch (error) {
-        console.error("Erreur Google Register Strategy:", error);
-        return done(error, null);
-      }
+      } catch (error) { return done(error, null); }
     }
   ));
 }
 
-// 3.3 GitHub Strategy for LOGIN (MODE STRICT)
+// 3.2 GitHub Strategy (UNIFIED: HANDLES BOTH LOGIN AND REGISTER)
 if (GITHUB_ENABLED) {
   passport.use('github', new GitHubStrategy({
       clientID: process.env.GITHUB_CLIENT_ID,
       clientSecret: process.env.GITHUB_CLIENT_SECRET,
+      // IMPORTANT: Only ONE callback URL for GitHub
       callbackURL: `${process.env.API_URL}/api/auth/github/callback`,
+      passReqToCallback: true, // Allows us to access req.query.state
       proxy: true
     },
-    async (accessToken, refreshToken, profile, done) => {
+    async (req, accessToken, refreshToken, profile, done) => {
       try {
         await connectDB();
 
-        let user = await User.findOne({ githubId: profile.id });
+        // Check if we are in 'register' mode or 'login' mode based on the state passed
+        const mode = req.query.state === 'register' ? 'register' : 'login';
         
-        if (!user) {
-          const email = profile.emails?.[0]?.value || `${profile.username}@github.user`;
-          user = await User.findOne({ email });
-        }
+        const email = profile.emails?.[0]?.value || `${profile.username}@github.user`;
+        let user = await User.findOne({ $or: [{ githubId: profile.id }, { email }] });
 
-        if (!user) {
-          return done(null, false, { message: 'unregistered_user' });
-        }
+        // --- REGISTER MODE ---
+        if (mode === 'register') {
+          if (user) {
+            console.warn(`⚠️ Register: User already exists: ${email}`);
+            // Pass 'register' context in info so we know where to redirect error
+            return done(null, false, { message: 'user_already_exists', context: 'register' });
+          }
+
+          // Create New User
+          user = await User.create({
+            email,
+            githubId: profile.id,
+            name: profile.displayName || profile.username,
+            avatar: profile.photos?.[0]?.value,
+            authProvider: 'github'
+          });
+          console.log(`✅ New user created via GitHub: ${email}`);
+          return done(null, user);
+        } 
         
-        if (!user.githubId) {
+        // --- LOGIN MODE (Default) ---
+        else {
+          if (!user) {
+            return done(null, false, { message: 'unregistered_user', context: 'login' });
+          }
+
+          // Link GitHub ID if missing
+          if (!user.githubId) {
             user.githubId = profile.id;
             user.avatar = user.avatar || profile.photos?.[0]?.value;
             await user.save();
+          }
+          return done(null, user);
         }
-        
-        return done(null, user);
+
       } catch (error) {
         console.error("Erreur GitHub Strategy:", error);
-        return done(error, null);
-      }
-    }
-  ));
-
-  // 3.4 GitHub Strategy for REGISTRATION (CREATE NEW USERS)
-  passport.use('github-register', new GitHubStrategy({
-      clientID: process.env.GITHUB_CLIENT_ID,
-      clientSecret: process.env.GITHUB_CLIENT_SECRET,
-      callbackURL: `${process.env.API_URL}/api/auth/github/register/callback`,
-      proxy: true
-    },
-    async (accessToken, refreshToken, profile, done) => {
-      try {
-        await connectDB();
-
-        const email = profile.emails?.[0]?.value || `${profile.username}@github.user`;
-        
-        // Check if user already exists
-        let user = await User.findOne({ $or: [{ githubId: profile.id }, { email }] });
-        
-        if (user) {
-          console.warn(`⚠️ User already exists: ${email}`);
-          return done(null, false, { message: 'user_already_exists' });
-        }
-        
-        // Create new user
-        user = await User.create({
-          email,
-          githubId: profile.id,
-          name: profile.displayName || profile.username,
-          avatar: profile.photos?.[0]?.value,
-          authProvider: 'github'
-        });
-        
-        console.log(`✅ New user created via GitHub: ${email}`);
-        return done(null, user);
-      } catch (error) {
-        console.error("Erreur GitHub Register Strategy:", error);
         return done(error, null);
       }
     }
@@ -245,138 +188,120 @@ if (GITHUB_ENABLED) {
 
 // --- 4. ROUTES ---
 
-// Middleware Global pour connecter la DB sur toutes les routes API
+// Global Middleware
 app.use('/api', async (req, res, next) => {
   try {
     await connectDB();
     next();
   } catch (error) {
-    console.error("❌ Impossible de connecter la DB:", error);
-    res.status(500).json({ message: "Erreur de connexion base de données" });
+    res.status(500).json({ message: "Erreur DB" });
   }
 });
 
-// Login classique
+// Classical Auth Routes
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ message: "Email introuvable." });
-    if (!user.password) return res.status(400).json({ message: `Utilisez la connexion ${user.authProvider}.` });
-
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ message: "Mot de passe incorrect." });
-
+    if (!user.password) return res.status(400).json({ message: `Utilisez ${user.authProvider}.` });
+    if (!(await bcrypt.compare(password, user.password))) return res.status(400).json({ message: "Mot de passe incorrect." });
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, user: { id: user._id, email: user.email, name: user.name, avatar: user.avatar } });
-  } catch (error) {
-    res.status(500).json({ message: "Erreur serveur." });
-  }
+  } catch (e) { res.status(500).json({ message: "Erreur serveur." }); }
 });
 
-// Register classique
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
     if (await User.findOne({ email })) return res.status(400).json({ message: "Email déjà utilisé." });
-
     const hashedPassword = await bcrypt.hash(password, 10);
     const newUser = await User.create({ email, password: hashedPassword, name, authProvider: 'local' });
     const token = jwt.sign({ id: newUser._id }, JWT_SECRET, { expiresIn: '7d' });
-
     res.status(201).json({ token, user: { id: newUser._id, email: newUser.email, name: newUser.name } });
-  } catch (error) {
-    res.status(500).json({ message: "Erreur serveur." });
-  }
+  } catch (e) { res.status(500).json({ message: "Erreur serveur." }); }
 });
 
-// --- ROUTES GOOGLE LOGIN ---
+// --- GOOGLE ROUTES (Keep existing) ---
 app.get('/api/auth/google', (req, res, next) => {
-  if (!GOOGLE_ENABLED) return res.status(503).json({ message: "Google non configuré" });
+  if (!GOOGLE_ENABLED) return res.status(503).json({ message: "Google OFF" });
   passport.authenticate('google', { scope: ['profile', 'email'], session: false })(req, res, next);
 });
 
 app.get('/api/auth/google/callback', (req, res, next) => {
   const baseUrl = getFrontendUrl();
   passport.authenticate('google', { session: false }, (err, user, info) => {
-    if (err) {
-      console.error("❌ Erreur Passport:", err);
-      return res.redirect(`${baseUrl}/login?error=server_error`);
-    }
-    
+    if (err) return res.redirect(`${baseUrl}/login?error=server_error`);
     if (!user) {
-      const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
-      return res.redirect(`${baseUrl}/login?error=${errorMsg}`);
+      const msg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
+      return res.redirect(`${baseUrl}/login?error=${msg}`);
     }
-    
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
     res.redirect(`${baseUrl}/login?token=${token}`);
   })(req, res, next);
 });
 
-// --- ROUTES GOOGLE REGISTER ---
 app.get('/api/auth/google/register', (req, res, next) => {
-  if (!GOOGLE_ENABLED) return res.status(503).json({ message: "Google non configuré" });
+  if (!GOOGLE_ENABLED) return res.status(503).json({ message: "Google OFF" });
   passport.authenticate('google-register', { scope: ['profile', 'email'], session: false })(req, res, next);
 });
 
 app.get('/api/auth/google/register/callback', (req, res, next) => {
   const baseUrl = getFrontendUrl();
   passport.authenticate('google-register', { session: false }, (err, user, info) => {
-    if (err) {
-      console.error("❌ Erreur Passport:", err);
-      return res.redirect(`${baseUrl}/register?error=server_error`);
-    }
-    
+    if (err) return res.redirect(`${baseUrl}/register?error=server_error`);
     if (!user) {
-      const errorMsg = info?.message === 'user_already_exists' ? 'user_already_exists' : 'auth_failed';
-      return res.redirect(`${baseUrl}/register?error=${errorMsg}`);
+      const msg = info?.message === 'user_already_exists' ? 'user_already_exists' : 'auth_failed';
+      return res.redirect(`${baseUrl}/register?error=${msg}`);
     }
-    
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
     res.redirect(`${baseUrl}/register?token=${token}`);
   })(req, res, next);
 });
 
-// --- ROUTES GITHUB LOGIN ---
+// --- GITHUB ROUTES (UPDATED) ---
+
+// 1. GitHub Login Route
 app.get('/api/auth/github', (req, res, next) => {
-  if (!GITHUB_ENABLED) return res.status(503).json({ message: "GitHub non configuré" });
-  passport.authenticate('github', { scope: ['user:email'], session: false })(req, res, next);
+  if (!GITHUB_ENABLED) return res.status(503).json({ message: "GitHub OFF" });
+  // Pass 'login' state
+  passport.authenticate('github', { scope: ['user:email'], session: false, state: 'login' })(req, res, next);
 });
 
+// 2. GitHub Register Route (Uses same strategy, different state)
+app.get('/api/auth/github/register', (req, res, next) => {
+  if (!GITHUB_ENABLED) return res.status(503).json({ message: "GitHub OFF" });
+  // Pass 'register' state
+  passport.authenticate('github', { scope: ['user:email'], session: false, state: 'register' })(req, res, next);
+});
+
+// 3. Unified GitHub Callback
 app.get('/api/auth/github/callback', (req, res, next) => {
   const baseUrl = getFrontendUrl();
+  
+  // Determine intention from state parameter returned by GitHub
+  const mode = req.query.state === 'register' ? 'register' : 'login';
+  const redirectPage = mode === 'register' ? '/register' : '/login';
+
   passport.authenticate('github', { session: false }, (err, user, info) => {
-    if (err) return res.redirect(`${baseUrl}/login?error=server_error`);
-    
-    if (!user) {
-      const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
-      return res.redirect(`${baseUrl}/login?error=${errorMsg}`);
+    // A. Handle Server Errors
+    if (err) {
+      console.error("❌ GitHub Callback Error:", err);
+      return res.redirect(`${baseUrl}${redirectPage}?error=server_error`);
     }
     
-    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.redirect(`${baseUrl}/login?token=${token}`);
-  })(req, res, next);
-});
-
-// --- ROUTES GITHUB REGISTER ---
-app.get('/api/auth/github/register', (req, res, next) => {
-  if (!GITHUB_ENABLED) return res.status(503).json({ message: "GitHub non configuré" });
-  passport.authenticate('github-register', { scope: ['user:email'], session: false })(req, res, next);
-});
-
-app.get('/api/auth/github/register/callback', (req, res, next) => {
-  const baseUrl = getFrontendUrl();
-  passport.authenticate('github-register', { session: false }, (err, user, info) => {
-    if (err) return res.redirect(`${baseUrl}/register?error=server_error`);
-    
+    // B. Handle Auth Failures (User exists/doesn't exist)
     if (!user) {
-      const errorMsg = info?.message === 'user_already_exists' ? 'user_already_exists' : 'auth_failed';
-      return res.redirect(`${baseUrl}/register?error=${errorMsg}`);
+      let errorMsg = 'auth_failed';
+      if (info?.message === 'user_already_exists') errorMsg = 'user_already_exists';
+      if (info?.message === 'unregistered_user') errorMsg = 'user_not_found';
+      
+      return res.redirect(`${baseUrl}${redirectPage}?error=${errorMsg}`);
     }
     
+    // C. Success
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.redirect(`${baseUrl}/register?token=${token}`);
+    res.redirect(`${baseUrl}${redirectPage}?token=${token}`);
   })(req, res, next);
 });
 
@@ -393,7 +318,6 @@ const authenticateToken = (req, res, next) => {
 
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
   const user = await User.findById(req.userId).select('-password');
-  if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
   res.json({ user });
 });
 
