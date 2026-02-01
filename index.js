@@ -80,11 +80,11 @@ console.log(`  - Google: ${GOOGLE_ENABLED ? '✅ Activé' : '❌ Désactivé'}`)
 console.log(`  - GitHub: ${GITHUB_ENABLED ? '✅ Activé' : '❌ Désactivé'}`);
 
 const getFrontendUrl = () => {
- let url = process.env.FRONTEND_URL || 'eausureapp://';
-  // Remove the last slash if it exists
-  if (url.endsWith('/')) {
-    url = url.slice(0, -1);
-  }
+  let url = process.env.FRONTEND_URL;
+
+  // remove trailing slashes
+  url = url.replace(/\/+$/, '');
+
   return url;
 };
 
