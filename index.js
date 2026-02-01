@@ -245,15 +245,15 @@ app.get('/api/auth/github', (req, res, next) => {
 app.get('/api/auth/github/callback', (req, res, next) => {
   const baseUrl = getFrontendUrl();
   passport.authenticate('github', { session: false }, (err, user, info) => {
-    if (err) return res.redirect(`${baseUrl}--/auth/callback?error=server_error`);
+    if (err) return res.redirect(`${baseUrl}login?error=server_error`);
     
     if (!user) {
       const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
-      return res.redirect(`${baseUrl}--/auth/callback?error=${errorMsg}`);
+      return res.redirect(`${baseUrl}login?error=${errorMsg}`);
     }
     
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.redirect(`${baseUrl}--/auth/callback?token=${token}`);
+    res.redirect(`${baseUrl}login?token=${token}`);
   })(req, res, next);
 });
 
