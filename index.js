@@ -214,13 +214,28 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
-    if (await User.findOne({ email })) return res.status(400).json({ message: "Email déjà utilisé." });
+
+    if (await User.findOne({ email })) {
+      return res.status(400).json({ message: "Email déjà utilisé." });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = await User.create({ email, password: hashedPassword, name, authProvider: 'local' });
-    const token = jwt.sign({ id: newUser._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.status(201).json({ token, user: { id: newUser._id, email: newUser.email, name: newUser.name } });
-  } catch (e) { res.status(500).json({ message: "Erreur serveur." }); }
+
+    await User.create({
+      email,
+      password: hashedPassword,
+      name,
+      authProvider: 'local'
+    });
+
+    // ✅ PAS DE TOKEN
+    res.status(201).json({ success: true });
+
+  } catch (e) {
+    res.status(500).json({ message: "Erreur serveur." });
+  }
 });
+
 
 // --- GOOGLE ROUTES (Keep existing) ---
 app.get('/api/auth/google', (req, res, next) => {
