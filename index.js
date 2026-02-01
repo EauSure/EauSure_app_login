@@ -88,7 +88,7 @@ const getFrontendUrl = () => {
   return url;
 };
 
-// 3.1 Google Strategy (MODE STRICT + DB CONNECT)
+// 3.1 Google Strategy for LOGIN (MODE STRICT)
 if (GOOGLE_ENABLED) {
   passport.use('google', new GoogleStrategy({
       clientID: process.env.GOOGLE_CLIENT_ID,
@@ -98,7 +98,6 @@ if (GOOGLE_ENABLED) {
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        // IMPORTANT : On s'assure que la DB est connectée AVANT de chercher
         await connectDB();
 
         let user = await User.findOne({ googleId: profile.id });
@@ -126,9 +125,48 @@ if (GOOGLE_ENABLED) {
       }
     }
   ));
+
+  // 3.2 Google Strategy for REGISTRATION (CREATE NEW USERS)
+  passport.use('google-register', new GoogleStrategy({
+      clientID: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      callbackURL: `${process.env.API_URL}/api/auth/google/register/callback`,
+      proxy: true
+    },
+    async (accessToken, refreshToken, profile, done) => {
+      try {
+        await connectDB();
+
+        const email = profile.emails[0].value;
+        
+        // Check if user already exists
+        let user = await User.findOne({ $or: [{ googleId: profile.id }, { email }] });
+        
+        if (user) {
+          console.warn(`⚠️ User already exists: ${email}`);
+          return done(null, false, { message: 'user_already_exists' });
+        }
+        
+        // Create new user
+        user = await User.create({
+          email,
+          googleId: profile.id,
+          name: profile.displayName,
+          avatar: profile.photos[0]?.value,
+          authProvider: 'google'
+        });
+        
+        console.log(`✅ New user created via Google: ${email}`);
+        return done(null, user);
+      } catch (error) {
+        console.error("Erreur Google Register Strategy:", error);
+        return done(error, null);
+      }
+    }
+  ));
 }
 
-// 3.2 GitHub Strategy (MODE STRICT + DB CONNECT)
+// 3.3 GitHub Strategy for LOGIN (MODE STRICT)
 if (GITHUB_ENABLED) {
   passport.use('github', new GitHubStrategy({
       clientID: process.env.GITHUB_CLIENT_ID,
@@ -138,7 +176,7 @@ if (GITHUB_ENABLED) {
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        await connectDB(); // Connexion explicite
+        await connectDB();
 
         let user = await User.findOne({ githubId: profile.id });
         
@@ -160,6 +198,45 @@ if (GITHUB_ENABLED) {
         return done(null, user);
       } catch (error) {
         console.error("Erreur GitHub Strategy:", error);
+        return done(error, null);
+      }
+    }
+  ));
+
+  // 3.4 GitHub Strategy for REGISTRATION (CREATE NEW USERS)
+  passport.use('github-register', new GitHubStrategy({
+      clientID: process.env.GITHUB_CLIENT_ID,
+      clientSecret: process.env.GITHUB_CLIENT_SECRET,
+      callbackURL: `${process.env.API_URL}/api/auth/github/register/callback`,
+      proxy: true
+    },
+    async (accessToken, refreshToken, profile, done) => {
+      try {
+        await connectDB();
+
+        const email = profile.emails?.[0]?.value || `${profile.username}@github.user`;
+        
+        // Check if user already exists
+        let user = await User.findOne({ $or: [{ githubId: profile.id }, { email }] });
+        
+        if (user) {
+          console.warn(`⚠️ User already exists: ${email}`);
+          return done(null, false, { message: 'user_already_exists' });
+        }
+        
+        // Create new user
+        user = await User.create({
+          email,
+          githubId: profile.id,
+          name: profile.displayName || profile.username,
+          avatar: profile.photos?.[0]?.value,
+          authProvider: 'github'
+        });
+        
+        console.log(`✅ New user created via GitHub: ${email}`);
+        return done(null, user);
+      } catch (error) {
+        console.error("Erreur GitHub Register Strategy:", error);
         return done(error, null);
       }
     }
@@ -213,7 +290,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// --- ROUTES GOOGLE ---
+// --- ROUTES GOOGLE LOGIN ---
 app.get('/api/auth/google', (req, res, next) => {
   if (!GOOGLE_ENABLED) return res.status(503).json({ message: "Google non configuré" });
   passport.authenticate('google', { scope: ['profile', 'email'], session: false })(req, res, next);
@@ -222,25 +299,46 @@ app.get('/api/auth/google', (req, res, next) => {
 app.get('/api/auth/google/callback', (req, res, next) => {
   const baseUrl = getFrontendUrl();
   passport.authenticate('google', { session: false }, (err, user, info) => {
-    // Cas Erreur Technique
     if (err) {
       console.error("❌ Erreur Passport:", err);
       return res.redirect(`${baseUrl}/login?error=server_error`);
     }
     
-    // Cas Utilisateur Inconnu (Mode Strict)
     if (!user) {
       const errorMsg = info?.message === 'unregistered_user' ? 'user_not_found' : 'auth_failed';
       return res.redirect(`${baseUrl}/login?error=${errorMsg}`);
     }
     
-    // Cas Succès
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
     res.redirect(`${baseUrl}/login?token=${token}`);
   })(req, res, next);
 });
 
-// --- ROUTES GITHUB ---
+// --- ROUTES GOOGLE REGISTER ---
+app.get('/api/auth/google/register', (req, res, next) => {
+  if (!GOOGLE_ENABLED) return res.status(503).json({ message: "Google non configuré" });
+  passport.authenticate('google-register', { scope: ['profile', 'email'], session: false })(req, res, next);
+});
+
+app.get('/api/auth/google/register/callback', (req, res, next) => {
+  const baseUrl = getFrontendUrl();
+  passport.authenticate('google-register', { session: false }, (err, user, info) => {
+    if (err) {
+      console.error("❌ Erreur Passport:", err);
+      return res.redirect(`${baseUrl}/register?error=server_error`);
+    }
+    
+    if (!user) {
+      const errorMsg = info?.message === 'user_already_exists' ? 'user_already_exists' : 'auth_failed';
+      return res.redirect(`${baseUrl}/register?error=${errorMsg}`);
+    }
+    
+    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
+    res.redirect(`${baseUrl}/register?token=${token}`);
+  })(req, res, next);
+});
+
+// --- ROUTES GITHUB LOGIN ---
 app.get('/api/auth/github', (req, res, next) => {
   if (!GITHUB_ENABLED) return res.status(503).json({ message: "GitHub non configuré" });
   passport.authenticate('github', { scope: ['user:email'], session: false })(req, res, next);
@@ -261,6 +359,27 @@ app.get('/api/auth/github/callback', (req, res, next) => {
   })(req, res, next);
 });
 
+// --- ROUTES GITHUB REGISTER ---
+app.get('/api/auth/github/register', (req, res, next) => {
+  if (!GITHUB_ENABLED) return res.status(503).json({ message: "GitHub non configuré" });
+  passport.authenticate('github-register', { scope: ['user:email'], session: false })(req, res, next);
+});
+
+app.get('/api/auth/github/register/callback', (req, res, next) => {
+  const baseUrl = getFrontendUrl();
+  passport.authenticate('github-register', { session: false }, (err, user, info) => {
+    if (err) return res.redirect(`${baseUrl}/register?error=server_error`);
+    
+    if (!user) {
+      const errorMsg = info?.message === 'user_already_exists' ? 'user_already_exists' : 'auth_failed';
+      return res.redirect(`${baseUrl}/register?error=${errorMsg}`);
+    }
+    
+    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '7d' });
+    res.redirect(`${baseUrl}/register?token=${token}`);
+  })(req, res, next);
+});
+
 // --- UTILS ---
 const authenticateToken = (req, res, next) => {
   const token = req.headers['authorization']?.split(' ')[1];
@@ -273,7 +392,6 @@ const authenticateToken = (req, res, next) => {
 };
 
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
-  // DB déjà connectée par le middleware global
   const user = await User.findById(req.userId).select('-password');
   if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
   res.json({ user });
